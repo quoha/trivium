@@ -124,10 +124,10 @@ vmrslt vm_run(vm *v) {
                 // stop running
                 return r;
             case VMOP_JEQ:
-                // pop target from stack
+                // pop address from stack
                 // if acc is zero then set program counter to target
                 do {
-                    unsigned int addr = v->ds[v->pds];
+                    unsigned char addr = v->ds[v->pds];
                     if (v->pds == 0) {
                         v->pds = VM_DSTACKSIZE - 1;
                     } else {
@@ -144,9 +144,9 @@ vmrslt vm_run(vm *v) {
                 } while (0);
                 continue;
             case VMOP_JMP:
-                // pop target from stack
+                // pop address from stack then set program counter to thatAddress
                 do {
-                    unsigned int addr = v->ds[v->pds];
+                    unsigned char addr = v->ds[v->pds];
                     if (v->pds == 0) {
                         v->pds = VM_DSTACKSIZE - 1;
                     } else {
