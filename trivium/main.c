@@ -5,10 +5,6 @@
 //  Created by Michael Henderson on 12/24/14.
 //  Copyright (c) 2014 Michael D Henderson. All rights reserved.
 //
-// It seems that every year ends with me toying around with the smallest set of instructions needed for a Forth VM. Rogozhin's 4 state universal Turing machine has 22 instructions. Stack machines cheat by combining some operations into a single instruction, so they need Stack (push data stack, pop data stack, push return stack, pop return stack), Arithmetic (subtract), and Control (unconditional and conditional jumps). Add instructions to read and write memory, and you have 9 instructions (11 if you want input and output). Not an efficient VM, but it's complete, right?
-//  With hints from
-//      http://homepage.cs.uiowa.edu/~jones/arch/cisc/
-//
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,27 +17,35 @@ void   vm_dump(vm *v);
 vm    *vm_new(void);
 vmrslt vm_run(vm *v);
 
-#define VM_CORESIZE  64
-#define VM_STACKSIZE 16
+#define VM_CORESIZE   64
+#define VM_DSTACKSIZE 16
+#define VM_RSTACKSIZE 16
 
 #define VMRT_OK     0
 #define VMRT_PANIC -1
 
-#define VMOP_NOOP 0x00
-#define VMOP_DUP  0x01
-#define VMOP_ONE  0x02
-#define VMOP_ZERO 0x03
-#define VMOP_LOAD 0x04
-#define VMOP_POP  0x05
-#define VMOP_SUB  0x06
-#define VMOP_JPOS 0x07
-#define VMOP_HALT 0x0F
+// there are three categories for instructions: Control, Stack, and Arithmetic
+#define VMOP_NOOP   0x00
+#define VMOP_JMP    0x01
+#define VMOP_JEQ    0x02
+#define VMOP_PUSH   0x03
+#define VMOP_POP    0x04
+#define VMOP_RPUSH  0x05
+#define VMOP_RPOP   0x06
+#define VMOP_ADD    0x07
+#define VMOP_SUB    0x08
+#define VMOP_LOAD   0x09
+#define VMOP_STOR   0x0a
+#define VMOP_HALT   0xff
 
 struct vm {
     unsigned int  pc;  // program counter
     unsigned int  pds; // pointer to top of data stack
-    char mem[VM_CORESIZE]; // core memory
-    char ds[VM_STACKSIZE]; // data stack
+    unsigned int  prs; // pointer to top of return stack
+    char acc; // accumulator
+    unsigned char mem[VM_CORESIZE]; // core memory
+    unsigned char ds[VM_DSTACKSIZE]; // data stack
+    unsigned char rs[VM_RSTACKSIZE]; // return stack
 };
 
 struct vmrslt {
@@ -64,11 +68,19 @@ void vm_dump(vm *v) {
         }
     }
     printf("\n.....: stack ");
-    for (idx = 0; idx < VM_STACKSIZE; idx++) {
+    for (idx = 0; idx < VM_DSTACKSIZE; idx++) {
         if (v->pds == idx) {
             printf("[%02x]", v->ds[idx]);
         } else {
             printf(" %02x ", v->ds[idx]);
+        }
+    }
+    printf("\n.....: rstk  ");
+    for (idx = 0; idx < VM_RSTACKSIZE; idx++) {
+        if (v->prs == idx) {
+            printf("[%02x]", v->rs[idx]);
+        } else {
+            printf(" %02x ", v->rs[idx]);
         }
     }
     printf("\n");
@@ -96,111 +108,140 @@ vmrslt vm_run(vm *v) {
         }
         unsigned char op = v->mem[v->pc++];
         switch (op) {
-            case VMOP_DUP:
-                // duplicate top of stack
+            case VMOP_ADD:
+                // pop s1 from stack, pop s2 from stack, push s2 + s1 on to stack
                 do {
-                    char tmp = v->ds[v->pds];
-                    v->pds++;
-                    if (v->pds == VM_STACKSIZE) {
-                        v->pds = 0;
+                    char s1 = v->ds[v->pds];
+                    if (v->pds == 0) {
+                        v->pds = VM_DSTACKSIZE - 1;
+                    } else {
+                        v->pds--;
                     }
-                    v->ds[v->pds] = tmp;
+                    v->ds[v->pds] = v->ds[v->pds] + s1;
                 } while (0);
                 continue;
             case VMOP_HALT:
                 // stop running
                 return r;
-            case VMOP_JPOS:
+            case VMOP_JEQ:
                 // pop target from stack
-                // pop test from stack
-                // if test is positive then set program counter to target
+                // if acc is zero then set program counter to target
                 do {
                     unsigned int addr = v->ds[v->pds];
                     if (v->pds == 0) {
-                        v->pds = VM_STACKSIZE - 1;
+                        v->pds = VM_DSTACKSIZE - 1;
                     } else {
                         v->pds--;
                     }
-                    char test = v->ds[v->pds];
-                    if (v->pds == 0) {
-                        v->pds = VM_STACKSIZE - 1;
-                    } else {
-                        v->pds--;
-                    }
-                    if (test >= 0) {
+                    if (v->acc == 0) {
                         if (addr >= VM_CORESIZE) {
                             r.status = VMRT_PANIC;
-                            r. err = "panic: pop address out of range";
+                            r. err = "panic: jeq address out of range";
                             return r;
                         }
                         v->pc = addr;
                     }
                 } while (0);
                 continue;
+            case VMOP_JMP:
+                // pop target from stack
+                do {
+                    unsigned int addr = v->ds[v->pds];
+                    if (v->pds == 0) {
+                        v->pds = VM_DSTACKSIZE - 1;
+                    } else {
+                        v->pds--;
+                    }
+                    if (addr >= VM_CORESIZE) {
+                        r.status = VMRT_PANIC;
+                        r. err = "panic: jump address out of range";
+                        return r;
+                    }
+                    v->pc = addr;
+                } while (0);
+                continue;
             case VMOP_LOAD:
-                // pop address from stack
-                // push mem[thatAddress] to stack
+                // pop address from stack and save mem[thatAddress] to acc
                 do {
                     char addr = v->ds[v->pds];
+                    if (v->pds == 0) {
+                        v->pds = VM_DSTACKSIZE - 1;
+                    } else {
+                        v->pds--;
+                    }
                     if (addr >= VM_CORESIZE) {
                         r.status = VMRT_PANIC;
                         r. err = "panic: load address out of range";
                         return r;
                     }
-                    v->ds[v->pds] = v->mem[addr];
+                    v->acc = v->mem[addr];
                 } while (0);
                 continue;
             case VMOP_NOOP:
                 // do nothing
                 continue;
-            case VMOP_ONE:
-                // shift the top of the stack left one bit,
-                // force the least significant bit to 1
-                v->ds[v->pds] = (v->ds[v->pds] << 1) + 1;
-                continue;
             case VMOP_POP:
-                // pop value from stack
-                // pop address from stack
-                // store value in mem[address]
+                // pop value from top of stack and save in acc
+                v->acc = v->ds[v->pds];
+                if (v->pds == 0) {
+                    v->pds = VM_DSTACKSIZE - 1;
+                } else {
+                    v->pds--;
+                }
+                continue;
+            case VMOP_PUSH:
+                // push acc to top of stack
+                v->pds++;
+                if (v->pds == VM_DSTACKSIZE) {
+                    v->pds = 0;
+                }
+                v->ds[v->pds] = v->acc;
+                continue;
+            case VMOP_RPOP:
+                // pop top value from stack and save in acc
+                v->acc = v->rs[v->prs];
+                if (v->prs == 0) {
+                    v->prs = VM_RSTACKSIZE - 1;
+                } else {
+                    v->prs--;
+                }
+                continue;
+            case VMOP_RPUSH:
+                // push acc to top of stack
+                v->prs++;
+                if (v->prs == VM_RSTACKSIZE) {
+                    v->prs = 0;
+                }
+                v->rs[v->prs] = v->acc;
+                continue;
+            case VMOP_STOR:
+                // pop address from stack and store acc in mem[thatAddress]
                 do {
-                    char val = v->ds[v->pds];
+                    char addr = v->ds[v->pds];
                     if (v->pds == 0) {
-                        v->pds = VM_STACKSIZE - 1;
-                    } else {
-                        v->pds--;
-                    }
-                    unsigned int addr = v->ds[v->pds];
-                    if (v->pds == 0) {
-                        v->pds = VM_STACKSIZE - 1;
+                        v->pds = VM_DSTACKSIZE - 1;
                     } else {
                         v->pds--;
                     }
                     if (addr >= VM_CORESIZE) {
                         r.status = VMRT_PANIC;
-                        r. err = "panic: pop address out of range";
+                        r. err = "panic: stor address out of range";
                         return r;
                     }
-                    v->mem[addr] = val;
+                    v->mem[addr] = v->acc;
                 } while (0);
                 continue;
             case VMOP_SUB:
-                // pop s1 from stack
-                // pop s2 from stack
-                // push s2 - s1 on to stack
+                // pop s1 from stack, pop s2 from stack, push s2 - s1 on to stack
                 do {
                     char s1 = v->ds[v->pds];
                     if (v->pds == 0) {
-                        v->pds = VM_STACKSIZE - 1;
+                        v->pds = VM_DSTACKSIZE - 1;
                     } else {
                         v->pds--;
                     }
                     v->ds[v->pds] = v->ds[v->pds] - s1;
                 } while (0);
-                continue;
-            case VMOP_ZERO:
-                // shift the top of the stack left one bit,
-                // force the least significant bit to 0
-                v->ds[v->pds] = (v->ds[v->pds] << 1) + 0;
                 continue;
         }
         r.status = VMRT_PANIC;
